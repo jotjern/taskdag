@@ -1,3 +1,5 @@
+import "./index.css";
+
 type Task = {
   label: string;
   subtasks?: Task[];

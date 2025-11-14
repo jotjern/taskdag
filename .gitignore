@@ -1,0 +1,17 @@
+# dependencies
+node_modules
+.pnpm-store
+
+# builds
+dist
+dist-ssr
+
+# environment files
+.env
+.env.*
+
+# misc
+.DS_Store
+*.local
+pnpm-debug.log*
+vite.config.ts.timestamp-*
