@@ -451,36 +451,66 @@ function setupPanHandlers(canvas: HTMLCanvasElement) {
   const updateHoverState = (event: PointerEvent) => {
     if (isDragging) return;
     const { worldX, worldY } = getWorldCoordinates(canvas, event);
-    let hitNode = hitTestNode(worldX, worldY);
+    
+    // If nodeHitboxes is empty, trigger a render first to populate it
+    if (nodeHitboxes.length === 0) {
+      render();
+      // After render, nodeHitboxes will be populated, so check again on next frame
+      requestAnimationFrame(() => {
+        const { worldX: wx, worldY: wy } = getWorldCoordinates(canvas, event);
+        updateHoverStateForPosition(wx, wy);
+      });
+      return;
+    }
+    
+    updateHoverStateForPosition(worldX, worldY);
+  };
+  
+  const updateHoverStateForPosition = (worldX: number, worldY: number) => {
+    // First check if hovering over any node (including menu area above it)
+    let hitNode: NodeHitbox | null = null;
     let action: ActionType | null = null;
-    if (hitNode) {
-      // Don't allow interaction with root task
-      if (hitNode.task === rootTask) {
-        hitNode = null;
-      } else {
-        // Check if hovering over the menu area (above the node) or the node itself
-        const menuHeight = NODE_HEIGHT * 0.75;
-        const nodeTop = hitNode.y;
-        const menuTop = nodeTop - menuHeight;
-        const isOverMenu = worldY >= menuTop && worldY < nodeTop && worldX >= hitNode.x && worldX <= hitNode.x + hitNode.width;
-        const isOverNode = worldY >= nodeTop && worldY < nodeTop + hitNode.height && worldX >= hitNode.x && worldX <= hitNode.x + hitNode.width;
-        
-        if (isOverMenu) {
-          // Hovering over menu - determine which action
-          action = getActionFromPosition(hitNode, worldX);
-        } else if (isOverNode) {
-          // Hovering over node itself - show menu with no action selected
-          action = null;
-        }
+    
+    // Check all nodes to see if mouse is over node or menu area
+    for (let i = nodeHitboxes.length - 1; i >= 0; i -= 1) {
+      const node = nodeHitboxes[i];
+      if (node.task === rootTask) continue;
+      
+      const menuHeight = NODE_HEIGHT * 0.75;
+      const nodeTop = node.y;
+      const menuTop = nodeTop - menuHeight;
+      const isOverMenu = worldY >= menuTop && worldY < nodeTop && worldX >= node.x && worldX <= node.x + node.width;
+      const isOverNode = worldY >= nodeTop && worldY < nodeTop + node.height && worldX >= node.x && worldX <= node.x + node.width;
+      
+      if (isOverMenu) {
+        // Hovering over menu - determine which action, but still show the menu
+        hitNode = node;
+        action = getActionFromPosition(node, worldX);
+        break;
+      } else if (isOverNode) {
+        // Hovering over node itself - show menu with no action selected
+        hitNode = node;
+        action = null;
+        break;
       }
     }
-    if (!hitNode || action === null) {
+    
+    // If over a node, check for floating add button (but don't override the node hover)
+    if (hitNode) {
+      const addButtonNode = hitTestFloatingAddButton(worldX, worldY);
+      if (addButtonNode && addButtonNode.task === hitNode.task) {
+        // Over the add button for this node - set action to "add" but keep the node
+        action = "add";
+      }
+    } else {
+      // If not over a node, check for floating add button
       const addButtonNode = hitTestFloatingAddButton(worldX, worldY);
       if (addButtonNode && addButtonNode.task !== rootTask) {
         hitNode = addButtonNode;
         action = "add";
       }
     }
+    
     hoveredNode = hitNode;
     hoveredAction = action;
     render();
@@ -1116,7 +1146,9 @@ function drawNode(
     progress && progress.total > 0 ? Math.min(progress.completed / progress.total, 1) : null;
 
   const isAddHover = hoveredNode?.task === task && hoveredAction === "add";
-  const showMenu = hoveredNode?.task === task && !isAddHover && hoveredAction === null;
+  // Show menu whenever hovering over the node, regardless of which action is hovered
+  // The menu will highlight the specific action if one is hovered, or show all actions if none is hovered
+  const showMenu = hoveredNode?.task === task && hoveredAction !== "add";
 
   ctx.save();
   // If showing menu above, don't round the top corners
