@@ -58,7 +58,10 @@ resource "aws_s3_bucket_cors_configuration" "state" {
   cors_rule {
     allowed_headers = ["*"]
     allowed_methods = ["GET", "PUT", "POST", "HEAD"]
-    allowed_origins = ["*"]
+    allowed_origins = [
+      "http://localhost:5173",
+      "https://jotjern.github.io",
+    ]
     max_age_seconds = 300
   }
 }
@@ -163,7 +166,10 @@ resource "aws_apigatewayv2_api" "http_api" {
   name          = "presign-http-api"
   protocol_type = "HTTP"
   cors_configuration {
-    allow_origins = ["*"]
+    allow_origins = [
+      "http://localhost:5173",
+      "https://jotjern.github.io",
+    ]
     allow_methods = ["OPTIONS", "POST"]
     allow_headers = ["Content-Type", "Authorization"]
   }

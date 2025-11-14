@@ -101,11 +101,43 @@ function computeLayoutHeight(task: Task): number {
 }
 
 // Load initial state from localStorage or use default
-function loadStateFromStorage(): { task: Task; states: Map<string, TaskState> } {
+async function loadStateFromStorage(): Promise<{ task: Task; states: Map<string, TaskState> }> {
+  // Try to load from AWS S3 first if signed in
+  const readUrl = sessionStorage.getItem("taskdag-readUrl");
+  if (readUrl) {
+    try {
+      const response = await fetch(readUrl);
+      if (response.ok) {
+        const data = await response.json();
+        // Ensure task structure is valid
+        if (data.task) {
+          ensureTaskStructure(data.task);
+        }
+        const stateMap = new Map<string, TaskState>();
+        if (Array.isArray(data.states)) {
+          data.states.forEach(([path, state]: [string, TaskState]) => {
+            stateMap.set(path, state);
+          });
+        }
+        return {
+          task: data.task || { label: "Base", subtasks: [] },
+          states: stateMap,
+        };
+      }
+    } catch (e) {
+      console.warn("Failed to load state from S3, falling back to localStorage", e);
+    }
+  }
+  
+  // Fall back to localStorage
   try {
     const saved = localStorage.getItem("taskdag-state");
     if (saved) {
       const parsed = JSON.parse(saved);
+      // Ensure task structure is valid
+      if (parsed.task) {
+        ensureTaskStructure(parsed.task);
+      }
       // Convert array of [string, TaskState] tuples to Map
       const stateMap = new Map<string, TaskState>();
       if (Array.isArray(parsed.states)) {
@@ -114,7 +146,7 @@ function loadStateFromStorage(): { task: Task; states: Map<string, TaskState> } 
         });
       }
       return {
-        task: parsed.task,
+        task: parsed.task || { label: "Base", subtasks: [] },
         states: stateMap,
       };
     }
@@ -188,7 +220,18 @@ function collectTaskStates(root: Task, states: WeakMap<Task, TaskState>, path: n
   return result;
 }
 
+function ensureTaskStructure(task: Task) {
+  if (!task.subtasks) {
+    task.subtasks = [];
+  }
+  task.subtasks.forEach((child) => {
+    ensureTaskStructure(child);
+  });
+}
+
 function restoreTaskStates(root: Task, states: WeakMap<Task, TaskState>, stateMap: Map<string, TaskState>, path: number[] = []) {
+  if (!root) return;
+  ensureTaskStructure(root);
   const pathKey = JSON.stringify(path);
   const state = stateMap.get(pathKey);
   if (state) {
@@ -199,13 +242,38 @@ function restoreTaskStates(root: Task, states: WeakMap<Task, TaskState>, stateMa
   });
 }
 
-function saveStateToStorage(root: Task, states: WeakMap<Task, TaskState>) {
+async function saveStateToStorage(root: Task, states: WeakMap<Task, TaskState>) {
   try {
     const stateArray = collectTaskStates(root, states);
     const data = {
       task: root,
       states: stateArray,
     };
+    
+    // Try to save to AWS S3 first if signed in
+    const writeUrl = sessionStorage.getItem("taskdag-writeUrl");
+    if (writeUrl) {
+      try {
+        const response = await fetch(writeUrl, {
+          method: "PUT",
+          headers: {
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify(data),
+        });
+        if (response.ok) {
+          // Also save to localStorage as backup
+          localStorage.setItem("taskdag-state", JSON.stringify(data));
+          return;
+        } else {
+          console.warn("Failed to save state to S3, falling back to localStorage", response.status);
+        }
+      } catch (e) {
+        console.warn("Failed to save state to S3, falling back to localStorage", e);
+      }
+    }
+    
+    // Fall back to localStorage
     localStorage.setItem("taskdag-state", JSON.stringify(data));
   } catch (e) {
     console.warn("Failed to save state to localStorage", e);
@@ -213,16 +281,16 @@ function saveStateToStorage(root: Task, states: WeakMap<Task, TaskState>) {
 }
 
 
-const initialState = loadStateFromStorage();
-let rootTask: Task = initialState.task;
+let rootTask: Task = { label: "Base", subtasks: [] };
+let initialState: { task: Task; states: Map<string, TaskState> };
 
 const { canvas, ctx } = initCanvas();
 let viewport = configureCanvas(canvas, ctx);
-const initialDepth = maxDepth(rootTask);
+let initialDepth = 1;
 let levelGap = computeLevelGap(initialDepth, viewport.width);
-let layoutHeight = computeLayoutHeight(rootTask);
-let panX = viewport.width / 2 - ((initialDepth * levelGap + NODE_WIDTH) / 2);
-let panY = viewport.height / 2 - layoutHeight / 2;
+let layoutHeight = 100;
+let panX = viewport.width / 2;
+let panY = viewport.height / 2;
 let zoom = 1;
 let panTargetX = panX;
 let panTargetY = panY;
@@ -234,8 +302,6 @@ let nodeHitboxes: NodeHitbox[] = [];
 const displayPositions = new Map<Task, Position>();
 let pendingNodes: PendingNode[] = [];
 const taskStates = new WeakMap<Task, TaskState>();
-// Restore states from localStorage
-restoreTaskStates(rootTask, taskStates, initialState.states);
 let layoutAnimationStartTime = 0;
 let layoutAnimationStartPositions: Map<Task, Position> | null = null;
 let layoutAnimationProgress = 1;
@@ -248,6 +314,7 @@ let pendingEditTask: Task | null = null;
 let pendingEditParent: Task | null = null;
 let pendingHoverTask: Task | null = null;
 const ROOT_ADD_BUTTON_ID = "add-root-task-button";
+const SIGN_IN_BUTTON_ID = "sign-in-button";
 const pressedKeys = new Set<string>();
 let keyboardAnimationHandle: number | null = null;
 let lastKeyboardAnimationTime: number = 0;
@@ -259,9 +326,24 @@ window.addEventListener("resize", () => {
   render();
 });
 setupAddRootChildButton();
+setupSignInButton();
 setupKeyboardShortcuts();
 
-render();
+// Load initial state asynchronously
+loadStateFromStorage().then((state) => {
+  initialState = state;
+  rootTask = initialState.task;
+  restoreTaskStates(rootTask, taskStates, initialState.states);
+  // Update viewport based on loaded state
+  initialDepth = maxDepth(rootTask);
+  levelGap = computeLevelGap(initialDepth, viewport.width);
+  layoutHeight = computeLayoutHeight(rootTask);
+  panX = viewport.width / 2 - ((initialDepth * levelGap + NODE_WIDTH) / 2);
+  panY = viewport.height / 2 - layoutHeight / 2;
+  panTargetX = panX;
+  panTargetY = panY;
+  render();
+});
 
 function render(timestamp: number = performance.now()) {
   updateLayoutAnimationState(timestamp);
@@ -541,8 +623,7 @@ function addRootChild() {
   rootTask.subtasks.push(newTask);
   pendingEditTask = newTask;
   pendingEditParent = rootTask;
-  saveStateToStorage(rootTask, taskStates);
-  render();
+  saveStateToStorage(rootTask, taskStates).then(() => render());
 }
 
 function setupAddRootChildButton() {
@@ -579,6 +660,104 @@ function setupAddRootChildButton() {
   button.addEventListener("pointerleave", () => {
     button.style.transform = "scale(1)";
     button.style.boxShadow = "0 12px 24px rgba(37, 99, 235, 0.3)";
+  });
+  document.body.appendChild(button);
+}
+
+async function signIn() {
+  // Get password from localStorage if available, otherwise prompt
+  let password = localStorage.getItem("taskdag-password");
+  if (!password) {
+    password = prompt("Enter password:");
+    if (!password) return;
+  }
+  
+  try {
+    const response = await fetch("https://6ev0r648ah.execute-api.us-west-1.amazonaws.com/presign", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ password }),
+    });
+    
+    if (!response.ok) {
+      alert("Invalid password");
+      localStorage.removeItem("taskdag-password");
+      return;
+    }
+    
+    const data = await response.json();
+    
+    // Store URLs in sessionStorage
+    sessionStorage.setItem("taskdag-readUrl", data.readUrl);
+    sessionStorage.setItem("taskdag-writeUrl", data.writeUrl);
+    
+    // Store password in localStorage
+    localStorage.setItem("taskdag-password", password);
+    
+    // Reload state from S3
+    const state = await loadStateFromStorage();
+    rootTask = state.task;
+    // Clear existing states by creating new WeakMap (can't clear WeakMap directly)
+    // We'll restore states to the new tree structure
+    restoreTaskStates(rootTask, taskStates, state.states);
+    
+    // Update viewport
+    initialDepth = maxDepth(rootTask);
+    levelGap = computeLevelGap(initialDepth, viewport.width);
+    layoutHeight = computeLayoutHeight(rootTask);
+    panX = viewport.width / 2 - ((initialDepth * levelGap + NODE_WIDTH) / 2);
+    panY = viewport.height / 2 - layoutHeight / 2;
+    panTargetX = panX;
+    panTargetY = panY;
+    
+    render();
+    
+    // Update button text
+    const button = document.getElementById(SIGN_IN_BUTTON_ID);
+    if (button) {
+      button.textContent = "✓ Signed In";
+      button.style.background = "linear-gradient(135deg, #22c55e, #16a34a)";
+    }
+  } catch (e) {
+    console.error("Failed to sign in", e);
+    alert("Failed to sign in. Please try again.");
+  }
+}
+
+function setupSignInButton() {
+  if (document.getElementById(SIGN_IN_BUTTON_ID)) return;
+  const button = document.createElement("button");
+  button.id = SIGN_IN_BUTTON_ID;
+  button.type = "button";
+  button.textContent = sessionStorage.getItem("taskdag-readUrl") ? "✓ Signed In" : "Sign In";
+  button.style.position = "fixed";
+  button.style.bottom = "24px";
+  button.style.right = "96px";
+  button.style.padding = "12px 24px";
+  button.style.borderRadius = "28px";
+  button.style.border = "none";
+  button.style.background = sessionStorage.getItem("taskdag-readUrl") 
+    ? "linear-gradient(135deg, #22c55e, #16a34a)"
+    : "linear-gradient(135deg, #64748b, #475569)";
+  button.style.color = "#ffffff";
+  button.style.fontSize = "14px";
+  button.style.fontWeight = "600";
+  button.style.cursor = "pointer";
+  button.style.boxShadow = "0 4px 12px rgba(0, 0, 0, 0.15)";
+  button.style.transition = "transform 0.15s ease, box-shadow 0.15s ease";
+  button.addEventListener("pointerdown", (event) => event.stopPropagation());
+  button.addEventListener("click", () => {
+    signIn();
+  });
+  button.addEventListener("mouseenter", () => {
+    button.style.transform = "scale(1.05)";
+    button.style.boxShadow = "0 6px 16px rgba(0, 0, 0, 0.2)";
+  });
+  button.addEventListener("mouseleave", () => {
+    button.style.transform = "scale(1)";
+    button.style.boxShadow = "0 4px 12px rgba(0, 0, 0, 0.15)";
   });
   document.body.appendChild(button);
 }
@@ -1332,8 +1511,7 @@ function handleAction(action: ActionType, node: NodeHitbox) {
   if (shouldAnimateLayout && previousPositions) {
     startLayoutAnimation(previousPositions);
   }
-  saveStateToStorage(rootTask, taskStates);
-  render();
+  saveStateToStorage(rootTask, taskStates).then(() => render());
 }
 
 function setTaskStateRecursive(task: Task, state: TaskState) {
@@ -1532,8 +1710,7 @@ function ensureEditingInput(): HTMLInputElement {
   input.addEventListener("input", () => {
     if (!editingTask) return;
     editingTask.label = input.value;
-    saveStateToStorage(rootTask, taskStates);
-    render();
+    saveStateToStorage(rootTask, taskStates).then(() => render());
   });
 
   input.addEventListener("keydown", (event) => {
@@ -1629,8 +1806,7 @@ function finishEditingTask(commit: boolean) {
   editingParentForRemoval = null;
   editingInitialLabel = "";
   editingInput.style.display = "none";
-  saveStateToStorage(rootTask, taskStates);
-  render();
+  saveStateToStorage(rootTask, taskStates).then(() => render());
 }
 
 function removeTaskFromParent(task: Task, parent: Task | null) {
