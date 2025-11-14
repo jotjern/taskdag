@@ -15,3 +15,5 @@ dist-ssr
 *.local
 pnpm-debug.log*
 vite.config.ts.timestamp-*
+
+infrastructure/
