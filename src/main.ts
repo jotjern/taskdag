@@ -1,15 +1,18 @@
 import "./index.css";
+import type { IconNode } from "lucide";
+import { Check, Edit, Plus, RotateCcw, Trash2, X } from "lucide";
 
 type Task = {
   label: string;
-  subtasks?: Task[];
+  subtasks: Task[];
 };
 
 type LayoutRange = [number, number];
 type Viewport = { width: number; height: number; dpr: number };
 type TaskState = "default" | "completed" | "cancelled";
-type ActionType = "cancel" | "complete" | "add" | "restore" | "delete";
+type ActionType = "cancel" | "complete" | "add" | "restore" | "delete" | "rename";
 type Position = { x: number; y: number };
+type FloatingAddButton = { cx: number; cy: number; radius: number };
 
 const FONT = "16px 'Inter', system-ui";
 const NODE_WIDTH = 220;
@@ -25,9 +28,6 @@ const ZOOM_SENSITIVITY = 0.0015;
 const CHILD_PADDING = 0;
 const NODE_VERTICAL_MARGIN = 24;
 const NODE_VERTICAL_SPACING = 60;
-const PROGRESS_BAR_HEIGHT = 6;
-const PROGRESS_BAR_MARGIN_X = 0;
-const PROGRESS_BAR_OFFSET_Y = 0;
 const CONNECTOR_COLOR = "rgba(148, 163, 184, 0.5)";
 const BACKGROUND_COLOR = "#ffffff";
 const BACKGROUND_GRID_COLOR = "rgba(148, 163, 184, 0.35)";
@@ -57,16 +57,37 @@ const ACTION_DEFINITIONS: Record<ActionType, { color: string; activeColor: strin
   add: { color: "#fde68a", activeColor: "#fbbf24" },
   restore: { color: "#c7d2fe", activeColor: "#818cf8" },
   delete: { color: "#fecaca", activeColor: "#f87171" },
+  rename: { color: "#fef3c7", activeColor: "#fbbf24" },
 };
 const ACTION_ICON_BASE_SIZE = 20;
 const ACTION_ICON_COLOR = "#0f172a";
+const KEYBOARD_PAN_STEP = 48;
+const KEYBOARD_ZOOM_FACTOR = 1.12;
+const KEYBOARD_PAN_SPEED = 800; // pixels per second
+const VIEWPORT_ANIMATION_EPS = 0.1;
+const PAN_ANIMATION_FACTOR = 0.15;
+const ZOOM_ANIMATION_FACTOR = 0.15;
+
+const ACTION_ICONS: Record<ActionType, IconNode> = {
+  cancel: X,
+  complete: Check,
+  add: Plus,
+  restore: RotateCcw,
+  delete: Trash2,
+  rename: Edit,
+};
 const OVERLAY_BORDER_COLOR = "rgba(15, 23, 42, 0.2)";
+const FLOATING_ADD_RADIUS = 18;
+const FLOATING_ADD_GAP = 12;
+const FLOATING_ADD_COLOR = "#2563eb";
+const FLOATING_ADD_ACTIVE_COLOR = "#1d4ed8";
+const FLOATING_ADD_ICON_COLOR = "#ffffff";
 let leafCounts = new WeakMap<Task, number>();
 
 function getLeafCount(task: Task): number {
   const cached = leafCounts.get(task);
   if (cached !== undefined) return cached;
-  const subtasks = task.subtasks ?? [];
+  const subtasks = task.subtasks;
   const leaves = subtasks.length
     ? subtasks.reduce((sum, child) => sum + getLeafCount(child), 0)
     : 1;
@@ -91,12 +112,12 @@ const rootTask: Task = {
             {
               label: "Recommendation letters",
               subtasks: [
-                { label: "Rec letter 1" },
-                { label: "Rec letter 2" },
-                { label: "Rec letter 3" },
+                { label: "Rec letter 1", subtasks: [] },
+                { label: "Rec letter 2", subtasks: [] },
+                { label: "Rec letter 3", subtasks: [] },
               ],
             },
-            { label: "Application letter" },
+            { label: "Application letter", subtasks: [] },
           ],
         },
       ],
@@ -112,6 +133,10 @@ let layoutHeight = computeLayoutHeight(rootTask);
 let panX = viewport.width / 2 - ((initialDepth * levelGap + NODE_WIDTH) / 2);
 let panY = viewport.height / 2 - layoutHeight / 2;
 let zoom = 1;
+let panTargetX = panX;
+let panTargetY = panY;
+let zoomTarget = zoom;
+let viewportAnimationHandle: number | null = null;
 let hoveredNode: NodeHitbox | null = null;
 let hoveredAction: ActionType | null = null;
 let nodeHitboxes: NodeHitbox[] = [];
@@ -128,7 +153,11 @@ let editingInitialLabel = "";
 let editingInput: HTMLInputElement | null = null;
 let pendingEditTask: Task | null = null;
 let pendingEditParent: Task | null = null;
+let pendingHoverTask: Task | null = null;
 const ROOT_ADD_BUTTON_ID = "add-root-task-button";
+const pressedKeys = new Set<string>();
+let keyboardAnimationHandle: number | null = null;
+let lastKeyboardAnimationTime: number = 0;
 
 setupPanHandlers(canvas);
 setupZoomHandler(canvas);
@@ -137,6 +166,7 @@ window.addEventListener("resize", () => {
   render();
 });
 setupAddRootChildButton();
+setupKeyboardShortcuts();
 
 render();
 
@@ -157,10 +187,39 @@ function render(timestamp: number = performance.now()) {
   drawTree(rootTask, layoutHeight);
   drawPendingNodes();
   ctx.restore();
+  
+  // Select parent after deletion
+  if (pendingHoverTask) {
+    const nodeHitbox = nodeHitboxes.find(n => n.task === pendingHoverTask);
+    if (nodeHitbox) {
+      hoveredNode = nodeHitbox;
+      hoveredAction = null;
+    } else {
+      // If parent not found, clear hover to prevent ghost hover
+      hoveredNode = null;
+      hoveredAction = null;
+    }
+    pendingHoverTask = null;
+    // Trigger another render to show the selection
+    requestAnimationFrame(() => render());
+    return;
+  }
+  
   if (pendingEditTask) {
-    startEditingTask(pendingEditTask, pendingEditParent ?? null);
+    // Set the node as hovered so it's highlighted (menu overlay will be drawn)
+    const nodeHitbox = nodeHitboxes.find(n => n.task === pendingEditTask);
+    if (nodeHitbox) {
+      hoveredNode = nodeHitbox;
+      hoveredAction = null; // Show menu overlay
+    }
+    const taskToEdit = pendingEditTask;
+    const parentToEdit = pendingEditParent;
     pendingEditTask = null;
     pendingEditParent = null;
+    // Start editing - input will be on top with higher z-index
+    startEditingTask(taskToEdit, parentToEdit);
+    // Trigger another render to show the menu overlay (input is already on top)
+    requestAnimationFrame(() => render());
   } else {
     positionEditingInput();
   }
@@ -207,13 +266,25 @@ function setupPanHandlers(canvas: HTMLCanvasElement) {
   const updateHoverState = (event: PointerEvent) => {
     if (isDragging) return;
     const { worldX, worldY } = getWorldCoordinates(canvas, event);
-    const hitNode = hitTestNode(worldX, worldY);
-    hoveredNode = hitNode;
+    let hitNode = hitTestNode(worldX, worldY);
+    let action: ActionType | null = null;
     if (hitNode) {
-      hoveredAction = getActionFromPosition(hitNode, worldX);
-    } else {
-      hoveredAction = null;
+      // Don't allow interaction with root task
+      if (hitNode.task === rootTask) {
+        hitNode = null;
+      } else {
+        action = getActionFromPosition(hitNode, worldX);
+      }
     }
+    if (!hitNode || action === null) {
+      const addButtonNode = hitTestFloatingAddButton(worldX, worldY);
+      if (addButtonNode && addButtonNode.task !== rootTask) {
+        hitNode = addButtonNode;
+        action = "add";
+      }
+    }
+    hoveredNode = hitNode;
+    hoveredAction = action;
     render();
   };
 
@@ -223,6 +294,11 @@ function setupPanHandlers(canvas: HTMLCanvasElement) {
       editingInput.blur();
     }
     updateHoverState(event);
+    // Don't allow actions on root task
+    if (hoveredNode && hoveredNode.task === rootTask) {
+      event.preventDefault();
+      return;
+    }
     if (hoveredNode && hoveredAction) {
       handleAction(hoveredAction, hoveredNode);
       hoveredAction = null;
@@ -242,6 +318,9 @@ function setupPanHandlers(canvas: HTMLCanvasElement) {
     if (isDragging) {
       panX = event.clientX - dragStartX;
       panY = event.clientY - dragStartY;
+      panTargetX = panX;
+      panTargetY = panY;
+      zoomTarget = zoom;
       render();
       event.preventDefault();
       return;
@@ -281,16 +360,82 @@ function setupZoomHandler(canvas: HTMLCanvasElement) {
       const canvasY = event.clientY - rect.top;
       const zoomDelta = Math.exp(-event.deltaY * ZOOM_SENSITIVITY);
       const newZoom = clamp(zoom * zoomDelta, ZOOM_MIN, ZOOM_MAX);
-      if (newZoom === zoom) return;
+      if (newZoom === zoomTarget) return;
       const worldX = (canvasX - panX) / zoom;
       const worldY = (canvasY - panY) / zoom;
-      zoom = newZoom;
-      panX = canvasX - worldX * zoom;
-      panY = canvasY - worldY * zoom;
-      render();
+      const targetPanX = canvasX - worldX * newZoom;
+      const targetPanY = canvasY - worldY * newZoom;
+      zoomTarget = newZoom;
+      panTargetX = targetPanX;
+      panTargetY = targetPanY;
+      scheduleViewportAnimation();
     },
     { passive: false }
   );
+}
+
+function panViewport(dx: number, dy: number) {
+  panTargetX += dx;
+  panTargetY += dy;
+  scheduleViewportAnimation();
+}
+
+function adjustZoomByKeyboard(factor: number) {
+  const canvasCenterX = viewport.width / 2;
+  const canvasCenterY = viewport.height / 2;
+  const worldX = (canvasCenterX - panX) / zoom;
+  const worldY = (canvasCenterY - panY) / zoom;
+  const newZoom = clamp(zoomTarget * factor, ZOOM_MIN, ZOOM_MAX);
+  if (newZoom === zoomTarget) return;
+  zoomTarget = newZoom;
+  panTargetX = canvasCenterX - worldX * newZoom;
+  panTargetY = canvasCenterY - worldY * newZoom;
+  scheduleViewportAnimation();
+}
+
+function scheduleViewportAnimation() {
+  if (viewportAnimationHandle !== null) return;
+  viewportAnimationHandle = requestAnimationFrame(stepViewportAnimation);
+}
+
+function stepViewportAnimation(time: number) {
+  viewportAnimationHandle = null;
+  const deltaX = panTargetX - panX;
+  const deltaY = panTargetY - panY;
+  const deltaZoom = zoomTarget - zoom;
+
+  let moving = false;
+  if (Math.abs(deltaX) > VIEWPORT_ANIMATION_EPS) {
+    panX += deltaX * PAN_ANIMATION_FACTOR;
+    moving = true;
+  } else {
+    panX = panTargetX;
+  }
+  if (Math.abs(deltaY) > VIEWPORT_ANIMATION_EPS) {
+    panY += deltaY * PAN_ANIMATION_FACTOR;
+    moving = true;
+  } else {
+    panY = panTargetY;
+  }
+  if (Math.abs(deltaZoom) > VIEWPORT_ANIMATION_EPS) {
+    zoom += deltaZoom * ZOOM_ANIMATION_FACTOR;
+    moving = true;
+  } else {
+    zoom = zoomTarget;
+  }
+
+  render();
+  if (moving) {
+    scheduleViewportAnimation();
+  }
+}
+
+function addRootChild() {
+  const newTask: Task = { label: "", subtasks: [] };
+  rootTask.subtasks.push(newTask);
+  pendingEditTask = newTask;
+  pendingEditParent = rootTask;
+  render();
 }
 
 function setupAddRootChildButton() {
@@ -318,12 +463,7 @@ function setupAddRootChildButton() {
   button.style.transition = "transform 0.15s ease, box-shadow 0.15s ease";
   button.addEventListener("pointerdown", (event) => event.stopPropagation());
   button.addEventListener("click", () => {
-    if (!rootTask.subtasks) rootTask.subtasks = [];
-    const newTask: Task = { label: "" };
-    rootTask.subtasks.push(newTask);
-    pendingEditTask = newTask;
-    pendingEditParent = rootTask;
-    render();
+    addRootChild();
   });
   button.addEventListener("pointerenter", () => {
     button.style.transform = "scale(1.05)";
@@ -334,6 +474,192 @@ function setupAddRootChildButton() {
     button.style.boxShadow = "0 12px 24px rgba(37, 99, 235, 0.3)";
   });
   document.body.appendChild(button);
+}
+
+function setupKeyboardShortcuts() {
+  window.addEventListener("keydown", (event) => {
+    if (editingTask) return;
+    if (event.metaKey || event.ctrlKey || event.altKey) return;
+    // Don't allow keyboard shortcuts on root task
+    if (hoveredNode && hoveredNode.task === rootTask) return;
+    let handled = false;
+
+    const key = event.key.toLowerCase();
+    
+    // Handle WASD for smooth panning
+    if (key === "w" || key === "s" || key === "a" || key === "d") {
+      if (!pressedKeys.has(key)) {
+        pressedKeys.add(key);
+        event.preventDefault();
+        startKeyboardAnimation();
+        handled = true;
+      }
+    }
+
+    // Handle other shortcuts (non-continuous)
+    if (!handled) {
+      switch (event.key) {
+        case "ArrowUp":
+        case "k":
+        case "K":
+          event.preventDefault();
+          moveHoveredNode("up");
+          handled = true;
+          break;
+        case "ArrowDown":
+        case "j":
+        case "J":
+          event.preventDefault();
+          moveHoveredNode("down");
+          handled = true;
+          break;
+        case "ArrowLeft":
+        case "h":
+        case "H":
+          event.preventDefault();
+          moveHoveredNode("left");
+          handled = true;
+          break;
+        case "ArrowRight":
+        case "l":
+        case "L":
+          event.preventDefault();
+          moveHoveredNode("right");
+          handled = true;
+          break;
+        case " ":
+        case "Spacebar":
+        case "Space": {
+          if (!hoveredNode) break;
+          event.preventDefault();
+          handleAction("complete", hoveredNode);
+          handled = true;
+          break;
+        }
+        case "Enter": {
+          event.preventDefault();
+          if (event.shiftKey) {
+            // Shift+Enter: create a new node
+            if (hoveredNode && hoveredNode.task !== rootTask) {
+              handleAction("add", hoveredNode);
+            } else {
+              addRootChild();
+            }
+          } else {
+            // Enter: rename the hovered node
+            if (hoveredNode && hoveredNode.task !== rootTask) {
+              handleAction("rename", hoveredNode);
+            }
+          }
+          handled = true;
+          break;
+        }
+        case "r":
+        case "R": {
+          if (!hoveredNode) break;
+          event.preventDefault();
+          handleAction("rename", hoveredNode);
+          handled = true;
+          break;
+        }
+        case "c":
+        case "C": {
+          if (!hoveredNode) break;
+          event.preventDefault();
+          handleAction("cancel", hoveredNode);
+          handled = true;
+          break;
+        }
+        case "Backspace": {
+          if (!hoveredNode) break;
+          event.preventDefault();
+          if (event.shiftKey) {
+            // Shift+Backspace: delete
+            handleAction("delete", hoveredNode);
+          } else {
+            // Backspace: cancel/uncancel
+            handleAction("cancel", hoveredNode);
+          }
+          handled = true;
+          break;
+        }
+      }
+    }
+
+    if (handled) {
+      hoveredAction = null;
+    }
+  });
+
+  window.addEventListener("keyup", (event) => {
+    if (editingTask) return;
+    const key = event.key.toLowerCase();
+    if (key === "w" || key === "s" || key === "a" || key === "d") {
+      pressedKeys.delete(key);
+      if (pressedKeys.size === 0) {
+        stopKeyboardAnimation();
+      }
+    }
+  });
+
+  // Handle case where user switches tabs or loses focus
+  window.addEventListener("blur", () => {
+    pressedKeys.clear();
+    stopKeyboardAnimation();
+  });
+}
+
+function startKeyboardAnimation() {
+  if (keyboardAnimationHandle !== null) return;
+  lastKeyboardAnimationTime = performance.now();
+  keyboardAnimationHandle = requestAnimationFrame(stepKeyboardAnimation);
+}
+
+function stopKeyboardAnimation() {
+  if (keyboardAnimationHandle !== null) {
+    cancelAnimationFrame(keyboardAnimationHandle);
+    keyboardAnimationHandle = null;
+  }
+}
+
+function stepKeyboardAnimation(time: number) {
+  keyboardAnimationHandle = null;
+  
+  if (pressedKeys.size === 0) {
+    return;
+  }
+
+  const deltaTime = (time - lastKeyboardAnimationTime) / 1000; // Convert to seconds
+  lastKeyboardAnimationTime = time;
+
+  let panDx = 0;
+  let panDy = 0;
+
+  // Calculate panning deltas
+  if (pressedKeys.has("w")) {
+    panDy += KEYBOARD_PAN_SPEED * deltaTime;
+  }
+  if (pressedKeys.has("s")) {
+    panDy -= KEYBOARD_PAN_SPEED * deltaTime;
+  }
+  if (pressedKeys.has("a")) {
+    panDx += KEYBOARD_PAN_SPEED * deltaTime;
+  }
+  if (pressedKeys.has("d")) {
+    panDx -= KEYBOARD_PAN_SPEED * deltaTime;
+  }
+
+  // Apply panning
+  if (panDx !== 0 || panDy !== 0) {
+    panTargetX += panDx;
+    panTargetY += panDy;
+    scheduleViewportAnimation();
+  }
+
+  // Continue animation if keys are still pressed
+  if (pressedKeys.size > 0) {
+    keyboardAnimationHandle = requestAnimationFrame(stepKeyboardAnimation);
+  }
 }
 
 function fillBackground(
@@ -371,7 +697,7 @@ function fillBackground(
 }
 
 function maxDepth(task: Task, level = 0): number {
-  const childDepths = (task.subtasks ?? []).map((child) =>
+  const childDepths = task.subtasks.map((child) =>
     maxDepth(child, level + 1)
   );
   return Math.max(level, ...childDepths);
@@ -402,7 +728,7 @@ function drawTask(
   const y = layoutHeightValue * ((start + end) / 2);
   const x = (taskDepth - level) * levelGap;
 
-  const subtasks = task.subtasks ?? [];
+  const subtasks = task.subtasks;
   const { x: displayX, y: displayY } = getAnimatedPosition(task, x, y);
   if (renderNode) {
     const progress = subtasks.length
@@ -472,7 +798,14 @@ type PendingNode = {
   progress?: NodeProgress;
 };
 
-function drawNode(task: Task, x: number, centerY: number, hasChildren: boolean, progress?: NodeProgress) {
+function drawNode(
+  task: Task,
+  x: number,
+  centerY: number,
+  hasChildren: boolean,
+  progress?: NodeProgress,
+  addButton?: FloatingAddButton | null
+) {
   const label = task.label;
   const state = taskStates.get(task) ?? "default";
   const top = centerY - NODE_HEIGHT / 2;
@@ -483,15 +816,26 @@ function drawNode(task: Task, x: number, centerY: number, hasChildren: boolean, 
       ? NODE_COLORS.cancelled
       : NODE_COLORS.default;
 
-  roundRect(x, top, NODE_WIDTH, NODE_HEIGHT, NODE_RADIUS);
+  const progressRatio =
+    progress && progress.total > 0 ? Math.min(progress.completed / progress.total, 1) : null;
 
-  ctx.fillStyle = colorSet.fill;
-  ctx.fill();
+  const isAddHover = hoveredNode?.task === task && hoveredAction === "add";
+  const showMenu = hoveredNode?.task === task && !isAddHover && hoveredAction === null;
 
-  if (progress && progress.total > 0) {
-    const ratio = Math.min(progress.completed / progress.total, 1);
-    drawProgressBar(x, top, NODE_WIDTH, PROGRESS_BAR_HEIGHT, ratio);
+  ctx.save();
+  // If showing menu above, don't round the top corners
+  if (showMenu) {
+    roundRectTopFlat(x, top, NODE_WIDTH, NODE_HEIGHT, NODE_RADIUS);
+  } else {
+    roundRect(x, top, NODE_WIDTH, NODE_HEIGHT, NODE_RADIUS);
   }
+  ctx.clip();
+  ctx.fillStyle = colorSet.fill;
+  ctx.fillRect(x, top, NODE_WIDTH, NODE_HEIGHT);
+  if (progressRatio !== null && progressRatio > 0) {
+    drawProgressOverlay(x, top, NODE_WIDTH, NODE_HEIGHT, progressRatio);
+  }
+  ctx.restore();
 
   let strokeColor;
   if (state === "completed") {
@@ -503,6 +847,13 @@ function drawNode(task: Task, x: number, centerY: number, hasChildren: boolean, 
   }
   ctx.strokeStyle = strokeColor;
   ctx.lineWidth = 2;
+  
+  // If showing menu above, don't round the top corners
+  if (showMenu) {
+    roundRectTopFlat(x, top, NODE_WIDTH, NODE_HEIGHT, NODE_RADIUS);
+  } else {
+    roundRect(x, top, NODE_WIDTH, NODE_HEIGHT, NODE_RADIUS);
+  }
   ctx.stroke();
 
   const textColor =
@@ -513,9 +864,26 @@ function drawNode(task: Task, x: number, centerY: number, hasChildren: boolean, 
       : NODE_COLORS.default.text;
   ctx.fillStyle = textColor;
   ctx.fillText(label, x + NODE_PADDING_X, centerY);
-
-  if (hoveredNode?.task === task) {
-    drawActionOverlay(task, x, top, NODE_WIDTH, NODE_HEIGHT, hoveredAction);
+  
+  // Draw menu above node if showing menu (slightly shorter)
+  if (showMenu) {
+    const menuHeight = NODE_HEIGHT * 0.75; // 75% of node height
+    const menuTop = top - menuHeight;
+    drawActionOverlay(task, x, menuTop, NODE_WIDTH, menuHeight, hoveredAction);
+    
+    // Draw highlight around both menu and node
+    ctx.save();
+    ctx.strokeStyle = "#2563eb"; // Blue highlight color
+    ctx.lineWidth = 3;
+    // Draw a rounded rect that contains both menu and node
+    const combinedHeight = menuHeight + NODE_HEIGHT;
+    const combinedTop = menuTop;
+    roundRect(x, combinedTop, NODE_WIDTH, combinedHeight, NODE_RADIUS);
+    ctx.stroke();
+    ctx.restore();
+  }
+  if (addButton) {
+    drawFloatingAddButton(task, addButton);
   }
 }
 
@@ -529,6 +897,32 @@ function roundRect(x: number, y: number, width: number, height: number, radius: 
   ctx.lineTo(x + radius, y + height);
   ctx.quadraticCurveTo(x, y + height, x, y + height - radius);
   ctx.lineTo(x, y + radius);
+  ctx.quadraticCurveTo(x, y, x + radius, y);
+  ctx.closePath();
+}
+
+function roundRectTopFlat(x: number, y: number, width: number, height: number, radius: number) {
+  // Rounded bottom corners only, flat top
+  ctx.beginPath();
+  ctx.moveTo(x, y); // Top left, no rounding
+  ctx.lineTo(x + width, y); // Top right, no rounding
+  ctx.lineTo(x + width, y + height - radius); // Right side down
+  ctx.quadraticCurveTo(x + width, y + height, x + width - radius, y + height); // Bottom right corner
+  ctx.lineTo(x + radius, y + height); // Bottom
+  ctx.quadraticCurveTo(x, y + height, x, y + height - radius); // Bottom left corner
+  ctx.lineTo(x, y); // Left side up
+  ctx.closePath();
+}
+
+function roundRectBottomFlat(x: number, y: number, width: number, height: number, radius: number) {
+  // Rounded top corners only, flat bottom
+  ctx.beginPath();
+  ctx.moveTo(x + radius, y);
+  ctx.lineTo(x + width - radius, y);
+  ctx.quadraticCurveTo(x + width, y, x + width, y + radius);
+  ctx.lineTo(x + width, y + height); // Right side down, no rounding
+  ctx.lineTo(x, y + height); // Bottom, no rounding
+  ctx.lineTo(x, y + radius); // Left side up
   ctx.quadraticCurveTo(x, y, x + radius, y);
   ctx.closePath();
 }
@@ -564,6 +958,8 @@ function getAnimatedPosition(task: Task, targetX: number, targetY: number): Posi
   };
 }
 
+type Direction = "up" | "down" | "left" | "right";
+
 type NodeHitbox = {
   task: Task;
   parent: Task | null;
@@ -571,6 +967,7 @@ type NodeHitbox = {
   y: number;
   width: number;
   height: number;
+  addButton?: FloatingAddButton | null;
 };
 
 function getWorldCoordinates(canvas: HTMLCanvasElement, event: PointerEvent) {
@@ -595,6 +992,86 @@ function hitTestNode(worldX: number, worldY: number): NodeHitbox | null {
   return null;
 }
 
+function hitTestFloatingAddButton(worldX: number, worldY: number): NodeHitbox | null {
+  for (let i = nodeHitboxes.length - 1; i >= 0; i -= 1) {
+    const node = nodeHitboxes[i];
+    const addButton = node.addButton;
+    if (!addButton) continue;
+    const dx = worldX - addButton.cx;
+    const dy = worldY - addButton.cy;
+    if (dx * dx + dy * dy <= addButton.radius * addButton.radius) {
+      return node;
+    }
+  }
+  return null;
+}
+
+function moveHoveredNode(direction: Direction) {
+  if (!nodeHitboxes.length) return;
+  if (!hoveredNode) {
+    hoveredNode = nodeHitboxes[0];
+    hoveredAction = null;
+    render();
+    return;
+  }
+  const neighbor = findDirectionalNeighbor(hoveredNode, direction);
+  if (!neighbor) return;
+  hoveredNode = neighbor;
+  hoveredAction = null;
+  render();
+}
+
+function findDirectionalNeighbor(origin: NodeHitbox | null, direction: Direction): NodeHitbox | null {
+  if (!origin) return null;
+  const originCenterX = origin.x + origin.width / 2;
+  const originCenterY = origin.y + origin.height / 2;
+  let best: NodeHitbox | null = null;
+  let bestScore = Infinity;
+  nodeHitboxes.forEach((candidate) => {
+    if (candidate === origin) return;
+    const candidateCenterX = candidate.x + candidate.width / 2;
+    const candidateCenterY = candidate.y + candidate.height / 2;
+    const dx = candidateCenterX - originCenterX;
+    const dy = candidateCenterY - originCenterY;
+    let inDirection = false;
+    let primary = 0;
+    let secondary = 0;
+    switch (direction) {
+      case "up":
+        if (dy >= 0) return;
+        inDirection = true;
+        primary = Math.abs(dy);
+        secondary = Math.abs(dx) * 0.5;
+        break;
+      case "down":
+        if (dy <= 0) return;
+        inDirection = true;
+        primary = Math.abs(dy);
+        secondary = Math.abs(dx) * 0.5;
+        break;
+      case "left":
+        if (dx >= 0) return;
+        inDirection = true;
+        primary = Math.abs(dx);
+        secondary = Math.abs(dy) * 0.5;
+        break;
+      case "right":
+        if (dx <= 0) return;
+        inDirection = true;
+        primary = Math.abs(dx);
+        secondary = Math.abs(dy) * 0.5;
+        break;
+    }
+    if (!inDirection) return;
+    const score = primary + secondary;
+    if (score < bestScore) {
+      bestScore = score;
+      best = candidate;
+    }
+  });
+  return best;
+}
+
 function getActionFromPosition(node: NodeHitbox, worldX: number): ActionType | null {
   const actions = getActionsForTask(node.task);
   if (!actions.length) return null;
@@ -606,11 +1083,15 @@ function getActionFromPosition(node: NodeHitbox, worldX: number): ActionType | n
 }
 
 function getActionsForTask(task: Task): ActionType[] {
+  // Base/root task is not interactable
+  if (task === rootTask) {
+    return [];
+  }
   const state = taskStates.get(task) ?? "default";
-  if (state === "cancelled") {
+  if (state === "cancelled" || state === "completed") {
     return ["delete", "restore"];
   }
-  return ["cancel", "complete", "add"];
+  return ["cancel", "rename", "complete"];
 }
 
 function handleAction(action: ActionType, node: NodeHitbox) {
@@ -630,11 +1111,9 @@ function handleAction(action: ActionType, node: NodeHitbox) {
       taskStates.set(task, "completed");
     }
   } else if (action === "add") {
-    if (!task.subtasks) {
-      task.subtasks = [];
-    }
     const newTask: Task = {
       label: "",
+      subtasks: [],
     };
     task.subtasks.push(newTask);
     taskStates.delete(task);
@@ -643,7 +1122,27 @@ function handleAction(action: ActionType, node: NodeHitbox) {
   } else if (action === "restore") {
     clearTaskStateRecursive(task);
   } else if (action === "delete") {
+    // Prevent deleting the root task
+    if (task === rootTask) {
+      return;
+    }
+    const parent = node.parent;
+    // Clear hovered node immediately to prevent ghost hover
+    if (hoveredNode && hoveredNode.task === task) {
+      hoveredNode = null;
+      hoveredAction = null;
+    }
     deleteTask(node);
+    // Select the parent after deletion
+    if (parent) {
+      pendingHoverTask = parent;
+    } else {
+      // If no parent, clear hover completely
+      hoveredNode = null;
+      hoveredAction = null;
+    }
+  } else if (action === "rename") {
+    startEditingTask(task, node.parent);
   }
   if (shouldAnimateLayout && previousPositions) {
     startLayoutAnimation(previousPositions);
@@ -653,17 +1152,17 @@ function handleAction(action: ActionType, node: NodeHitbox) {
 
 function setTaskStateRecursive(task: Task, state: TaskState) {
   taskStates.set(task, state);
-  (task.subtasks ?? []).forEach((child) => setTaskStateRecursive(child, state));
+  task.subtasks.forEach((child) => setTaskStateRecursive(child, state));
 }
 
 function clearTaskStateRecursive(task: Task) {
   taskStates.delete(task);
-  (task.subtasks ?? []).forEach((child) => clearTaskStateRecursive(child));
+  task.subtasks.forEach((child) => clearTaskStateRecursive(child));
 }
 
 function deleteTask(node: NodeHitbox) {
   const parent = node.parent;
-  if (!parent || !parent.subtasks) return;
+  if (!parent) return;
   parent.subtasks = parent.subtasks.filter((child) => child !== node.task);
   clearTaskStateRecursive(node.task);
 }
@@ -678,12 +1177,14 @@ function drawActionOverlay(
 ) {
   const actions = getActionsForTask(task);
   if (!actions.length) return;
+  const isDefaultState = (taskStates.get(task) ?? "default") === "default";
   const sectionWidth = width / actions.length;
   ctx.save();
   ctx.lineWidth = 1;
   ctx.textAlign = "center";
   ctx.textBaseline = "middle";
-  roundRect(x, top, width, height, NODE_RADIUS);
+  // Use bottom-flat rounded rect (flat bottom to connect with node)
+  roundRectBottomFlat(x, top, width, height, NODE_RADIUS);
   ctx.clip();
 
   actions.forEach((actionType, index) => {
@@ -698,74 +1199,91 @@ function drawActionOverlay(
 
     const centerX = rawStart + sectionWidth / 2;
     const centerY = top + height / 2;
-    const iconSize = Math.min(sectionWidth, height) * 0.5;
+    const iconMultiplier = isDefaultState ? 0.6 : 0.5;
+    const iconSize = Math.min(sectionWidth, height) * iconMultiplier;
     drawActionIcon(actionType, centerX, centerY, Math.min(iconSize, ACTION_ICON_BASE_SIZE));
   });
 
   ctx.restore();
   ctx.save();
   ctx.strokeStyle = OVERLAY_BORDER_COLOR;
-  roundRect(x, top, width, height, NODE_RADIUS);
+  // Use bottom-flat rounded rect for border
+  roundRectBottomFlat(x, top, width, height, NODE_RADIUS);
   ctx.stroke();
   ctx.restore();
 }
 
-function drawActionIcon(action: ActionType, centerX: number, centerY: number, size: number) {
-  const half = size / 2;
+function drawFloatingAddButton(task: Task, button: FloatingAddButton) {
+  if (!shouldShowFloatingAddButton(task)) return;
+  const isHovered = hoveredNode?.task === task && hoveredAction === "add";
   ctx.save();
-  ctx.lineWidth = 2.4;
-  ctx.strokeStyle = ACTION_ICON_COLOR;
+  ctx.beginPath();
+  const visualRadius = FLOATING_ADD_RADIUS;
+  ctx.arc(button.cx, button.cy, visualRadius, 0, Math.PI * 2);
+  ctx.shadowColor = "rgba(37, 99, 235, 0.3)";
+  ctx.shadowBlur = 12;
+  ctx.fillStyle = isHovered ? FLOATING_ADD_ACTIVE_COLOR : FLOATING_ADD_COLOR;
+  ctx.fill();
+  ctx.shadowBlur = 0;
+  ctx.strokeStyle = "rgba(255, 255, 255, 0.5)";
+  ctx.lineWidth = 1;
+  ctx.stroke();
+  const icon = ACTION_ICONS.add;
+  const iconSize = FLOATING_ADD_RADIUS * 1;
+  drawLucideIcon(icon, button.cx, button.cy, iconSize, FLOATING_ADD_ICON_COLOR);
+  ctx.restore();
+}
+
+function getFloatingAddButtonPlacement(task: Task, nodeX: number, centerY: number): FloatingAddButton | null {
+  const state = taskStates.get(task) ?? "default";
+  if (state !== "default") return null;
+  return {
+    cx: nodeX - FLOATING_ADD_GAP - FLOATING_ADD_RADIUS,
+    cy: centerY,
+    radius: FLOATING_ADD_RADIUS * 1.6,
+  };
+}
+
+function shouldShowFloatingAddButton(task: Task): boolean {
+  if (!hoveredNode) return false;
+  return hoveredNode.task === task;
+}
+
+function drawActionIcon(action: ActionType, centerX: number, centerY: number, size: number) {
+  const icon = ACTION_ICONS[action];
+  if (!icon) return;
+  drawLucideIcon(icon, centerX, centerY, size, ACTION_ICON_COLOR);
+}
+
+function drawLucideIcon(icon: IconNode, centerX: number, centerY: number, size: number, color: string) {
+  const viewBoxSize = 24;
+  ctx.save();
+  ctx.translate(centerX - size / 2, centerY - size / 2);
+  const scale = size / viewBoxSize;
+  ctx.scale(scale, scale);
   ctx.lineCap = "round";
   ctx.lineJoin = "round";
-  ctx.translate(centerX, centerY);
+  ctx.strokeStyle = color;
+  ctx.fillStyle = color;
+  ctx.lineWidth = 2;
 
-  switch (action) {
-    case "cancel":
-      ctx.beginPath();
-      ctx.moveTo(-half, -half);
-      ctx.lineTo(half, half);
-      ctx.moveTo(half, -half);
-      ctx.lineTo(-half, half);
-      ctx.stroke();
-      break;
-    case "complete":
-      ctx.beginPath();
-      ctx.moveTo(-half * 0.6, 0);
-      ctx.lineTo(-half * 0.1, half * 0.7);
-      ctx.lineTo(half * 0.8, -half * 0.7);
-      ctx.stroke();
-      break;
-    case "add":
-      ctx.beginPath();
-      ctx.moveTo(0, -half);
-      ctx.lineTo(0, half);
-      ctx.moveTo(-half, 0);
-      ctx.lineTo(half, 0);
-      ctx.stroke();
-      break;
-    case "restore":
-      ctx.beginPath();
-      ctx.arc(0, 0, half * 0.9, Math.PI * 0.2, Math.PI * 1.3);
-      ctx.moveTo(-half * 0.2, -half * 0.2);
-      ctx.lineTo(-half * 0.9, -half * 0.2);
-      ctx.lineTo(-half * 0.7, half * 0.5);
-      ctx.stroke();
-      break;
-    case "delete":
-      ctx.beginPath();
-      ctx.moveTo(-half * 0.6, -half * 0.4);
-      ctx.lineTo(half * 0.6, -half * 0.4);
-      ctx.moveTo(-half * 0.6, -half * 0.4);
-      ctx.lineTo(-half * 0.5, half * 0.6);
-      ctx.lineTo(half * 0.5, half * 0.6);
-      ctx.lineTo(half * 0.6, -half * 0.4);
-      ctx.moveTo(0, -half * 0.7);
-      ctx.lineTo(0, -half * 0.4);
-      ctx.moveTo(-half * 0.3, -half * 0.8);
-      ctx.lineTo(half * 0.3, -half * 0.8);
-      ctx.stroke();
-      break;
-  }
+  icon.forEach(([tag, attrs]) => {
+    switch (tag) {
+      case "path": {
+        const d = attrs.d;
+        if (!d) break;
+        const path = new Path2D(String(d));
+        const fill = (attrs.fill as string) ?? "none";
+        if (fill && fill !== "none") {
+          ctx.fill(path);
+        }
+        ctx.stroke(path);
+        break;
+      }
+      default:
+        break;
+    }
+  });
 
   ctx.restore();
 }
@@ -773,32 +1291,36 @@ function drawActionIcon(action: ActionType, centerX: number, centerY: number, si
 function drawPendingNodes() {
   pendingNodes.forEach(({ task, x, y, hasChildren, parent, progress }) => {
     const top = y - NODE_HEIGHT / 2;
-    nodeHitboxes.push({ task, parent, x, y: top, width: NODE_WIDTH, height: NODE_HEIGHT });
-    drawNode(task, x, y, hasChildren, progress);
+    const addButton = getFloatingAddButtonPlacement(task, x, y);
+    nodeHitboxes.push({
+      task,
+      parent,
+      x,
+      y: top,
+      width: NODE_WIDTH,
+      height: NODE_HEIGHT,
+      addButton,
+    });
+    drawNode(task, x, y, hasChildren, progress, addButton);
   });
 }
 
-function drawProgressBar(x: number, top: number, width: number, height: number, ratio: number) {
-  const radius = NODE_RADIUS;
-  ctx.save();
-  ctx.beginPath();
-  ctx.moveTo(x + radius, top);
-  ctx.lineTo(x + width - radius, top);
-  ctx.quadraticCurveTo(x + width, top, x + width, top + radius);
-  ctx.lineTo(x + width, top + height);
-  ctx.lineTo(x, top + height);
-  ctx.lineTo(x, top + radius);
-  ctx.quadraticCurveTo(x, top, x + radius, top);
-  ctx.closePath();
-  ctx.clip();
-  ctx.fillStyle = "rgba(15, 23, 42, 0.08)";
-  ctx.fillRect(x, top, width, height);
+function drawProgressOverlay(x: number, top: number, width: number, height: number, ratio: number) {
+  const fillWidth = Math.max(width * ratio, 0);
+  if (fillWidth <= 0) return;
 
-  if (ratio > 0) {
-    ctx.fillStyle = "rgba(34, 197, 94, 0.9)";
-    ctx.fillRect(x, top, width * ratio, height);
-  }
-  ctx.restore();
+  const gradient = ctx.createLinearGradient(x, top, x + fillWidth, top);
+  gradient.addColorStop(0, "rgba(34, 197, 94, 0.25)");
+  gradient.addColorStop(0.5, "rgba(34, 197, 94, 0.35)");
+  gradient.addColorStop(1, "rgba(34, 197, 94, 0.45)");
+
+  ctx.fillStyle = gradient;
+  ctx.fillRect(x, top, fillWidth, height);
+
+  ctx.fillStyle = "rgba(255, 255, 255, 0.35)";
+  ctx.fillRect(x, top, fillWidth, 1);
+  ctx.fillStyle = "rgba(15, 23, 42, 0.15)";
+  ctx.fillRect(x, top + height - 1, fillWidth, 1);
 }
 
 function ensureEditingInput(): HTMLInputElement {
@@ -808,7 +1330,7 @@ function ensureEditingInput(): HTMLInputElement {
   input.autocomplete = "off";
   input.spellcheck = false;
   input.style.position = "absolute";
-  input.style.zIndex = "10";
+  input.style.zIndex = "100"; // Higher z-index to show above menu overlay
   input.style.border = "1px solid #d4d4d8";
   input.style.borderRadius = `${NODE_RADIUS}px`;
   input.style.background = "rgba(255,255,255,0.95)";
@@ -831,9 +1353,11 @@ function ensureEditingInput(): HTMLInputElement {
     if (event.key === "Enter") {
       event.preventDefault();
       finishEditingTask(true);
+      event.stopPropagation();
     } else if (event.key === "Escape") {
       event.preventDefault();
       finishEditingTask(false);
+      event.stopPropagation();
     }
   });
 
@@ -925,6 +1449,55 @@ function removeTaskFromParent(task: Task, parent: Task | null) {
   if (!parent || !parent.subtasks) return;
   parent.subtasks = parent.subtasks.filter((child) => child !== task);
   clearTaskStateRecursive(task);
+}
+
+function drawTooltipBubble(node: NodeHitbox) {
+  const task = node.task;
+  const label = task.label || "(empty)";
+  
+  // Calculate screen position
+  const screenX = panX + zoom * (node.x + node.width / 2);
+  const screenY = panY + zoom * node.y;
+  
+  // Tooltip styling
+  const padding = 8;
+  const borderRadius = 6;
+  const fontSize = 12;
+  const lineHeight = 16;
+  const maxWidth = 200;
+  
+  ctx.save();
+  ctx.font = `${fontSize}px 'Inter', system-ui`;
+  ctx.textAlign = "center";
+  ctx.textBaseline = "top";
+  
+  // Measure text
+  const metrics = ctx.measureText(label);
+  const textWidth = Math.min(metrics.width, maxWidth);
+  const tooltipWidth = textWidth + padding * 2;
+  const tooltipHeight = lineHeight + padding * 2;
+  
+  // Position above the node
+  const tooltipX = screenX - tooltipWidth / 2;
+  const tooltipY = screenY - tooltipHeight - 8; // 8px gap above node
+  
+  // Draw bubble background
+  ctx.fillStyle = "rgba(15, 23, 42, 0.95)";
+  ctx.beginPath();
+  roundRect(tooltipX, tooltipY, tooltipWidth, tooltipHeight, borderRadius);
+  ctx.fill();
+  
+  // Draw border
+  ctx.strokeStyle = "rgba(255, 255, 255, 0.2)";
+  ctx.lineWidth = 1;
+  roundRect(tooltipX, tooltipY, tooltipWidth, tooltipHeight, borderRadius);
+  ctx.stroke();
+  
+  // Draw text
+  ctx.fillStyle = "#ffffff";
+  ctx.fillText(label, screenX, tooltipY + padding);
+  
+  ctx.restore();
 }
 
 function captureDisplayPositions(): Map<Task, Position> {
