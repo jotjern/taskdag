@@ -4,4 +4,5 @@ export default defineConfig({
   server: {
     open: false,
   },
+  base: "/taskdag/"
 });
