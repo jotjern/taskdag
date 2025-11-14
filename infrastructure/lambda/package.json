@@ -1,0 +1,14 @@
+{
+  "name": "presign-lambda",
+  "version": "1.0.0",
+  "description": "Lambda that validates a password and issues S3 pre-signed GET/PUT URLs",
+  "main": "index.js",
+  "type": "commonjs",
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "@aws-sdk/client-s3": "^3.588.0",
+    "@aws-sdk/s3-request-presigner": "^3.588.0"
+  }
+}
