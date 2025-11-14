@@ -1105,6 +1105,7 @@ function moveHoveredNode(direction: Direction) {
   if (!hoveredNode) {
     hoveredNode = nodeHitboxes[0];
     hoveredAction = null;
+    ensureNodeInView(hoveredNode);
     render();
     return;
   }
@@ -1112,7 +1113,89 @@ function moveHoveredNode(direction: Direction) {
   if (!neighbor) return;
   hoveredNode = neighbor;
   hoveredAction = null;
+  ensureNodeInView(hoveredNode);
   render();
+}
+
+function ensureNodeInView(node: NodeHitbox) {
+  // Calculate node bounds in screen coordinates
+  const nodeCenterX = node.x + node.width / 2;
+  const nodeCenterY = node.y + node.height / 2;
+  const nodeLeft = node.x;
+  const nodeRight = node.x + node.width;
+  const nodeTop = node.y;
+  const nodeBottom = node.y + node.height;
+  
+  // Convert to screen coordinates
+  const screenLeft = panX + zoom * nodeLeft;
+  const screenRight = panX + zoom * nodeRight;
+  const screenTop = panY + zoom * nodeTop;
+  const screenBottom = panY + zoom * nodeBottom;
+  const screenCenterX = panX + zoom * nodeCenterX;
+  const screenCenterY = panY + zoom * nodeCenterY;
+  
+  // Check if node is in view with some margin
+  const margin = 40;
+  const viewLeft = margin;
+  const viewRight = viewport.width - margin;
+  const viewTop = margin;
+  const viewBottom = viewport.height - margin;
+  
+  let needsPan = false;
+  let targetPanX = panTargetX;
+  let targetPanY = panTargetY;
+  
+  // Check horizontal visibility
+  if (screenRight < viewLeft) {
+    // Node is to the left of viewport
+    const offset = viewLeft - screenCenterX;
+    targetPanX = panTargetX + offset;
+    needsPan = true;
+  } else if (screenLeft > viewRight) {
+    // Node is to the right of viewport
+    const offset = viewRight - screenCenterX;
+    targetPanX = panTargetX + offset;
+    needsPan = true;
+  } else if (screenLeft < viewLeft) {
+    // Node is partially off left edge
+    const offset = viewLeft - screenLeft;
+    targetPanX = panTargetX + offset;
+    needsPan = true;
+  } else if (screenRight > viewRight) {
+    // Node is partially off right edge
+    const offset = viewRight - screenRight;
+    targetPanX = panTargetX + offset;
+    needsPan = true;
+  }
+  
+  // Check vertical visibility
+  if (screenBottom < viewTop) {
+    // Node is above viewport
+    const offset = viewTop - screenCenterY;
+    targetPanY = panTargetY + offset;
+    needsPan = true;
+  } else if (screenTop > viewBottom) {
+    // Node is below viewport
+    const offset = viewBottom - screenCenterY;
+    targetPanY = panTargetY + offset;
+    needsPan = true;
+  } else if (screenTop < viewTop) {
+    // Node is partially off top edge
+    const offset = viewTop - screenTop;
+    targetPanY = panTargetY + offset;
+    needsPan = true;
+  } else if (screenBottom > viewBottom) {
+    // Node is partially off bottom edge
+    const offset = viewBottom - screenBottom;
+    targetPanY = panTargetY + offset;
+    needsPan = true;
+  }
+  
+  if (needsPan) {
+    panTargetX = targetPanX;
+    panTargetY = targetPanY;
+    scheduleViewportAnimation();
+  }
 }
 
 function findDirectionalNeighbor(origin: NodeHitbox | null, direction: Direction): NodeHitbox | null {
