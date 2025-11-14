@@ -218,6 +218,39 @@ function getTaskByPath(root: Task, path: number[]): Task | null {
   return current;
 }
 
+function getRootChildIndex(task: Task): number | null {
+  // If task is the root, return null
+  if (task === rootTask) return null;
+  
+  // Find which root child this task belongs to
+  for (let i = 0; i < rootTask.subtasks.length; i++) {
+    const rootChild = rootTask.subtasks[i];
+    if (task === rootChild) {
+      return i;
+    }
+    // Check if task is a descendant of this root child
+    const path = getTaskPath(task, rootChild);
+    if (path !== null) {
+      return i;
+    }
+  }
+  return null;
+}
+
+// Light tint colors for root children (pastel colors)
+const ROOT_CHILD_TINTS = [
+  "#fef3c7", // Light yellow
+  "#e0e7ff", // Light indigo
+  "#fce7f3", // Light pink
+  "#d1fae5", // Light green
+  "#fde68a", // Light amber
+  "#e0f2fe", // Light cyan
+  "#f3e8ff", // Light purple
+  "#fef2f2", // Light red
+  "#ecfdf5", // Light emerald
+  "#f0f9ff", // Light sky
+];
+
 function collectTaskStates(root: Task, states: WeakMap<Task, TaskState>, path: number[] = []): Array<[string, TaskState]> {
   const result: Array<[string, TaskState]> = [];
   const state = states.get(root);
@@ -1150,6 +1183,10 @@ function drawNode(
   // The menu will highlight the specific action if one is hovered, or show all actions if none is hovered
   const showMenu = hoveredNode?.task === task && hoveredAction !== "add";
 
+  // Get root child index for tinting
+  const rootChildIndex = getRootChildIndex(task);
+  const tintColor = rootChildIndex !== null ? ROOT_CHILD_TINTS[rootChildIndex % ROOT_CHILD_TINTS.length] : null;
+  
   ctx.save();
   // If showing menu above, don't round the top corners
   if (showMenu) {
@@ -1158,8 +1195,19 @@ function drawNode(
     roundRect(x, top, NODE_WIDTH, NODE_HEIGHT, NODE_RADIUS);
   }
   ctx.clip();
+  
+  // Apply base fill color
   ctx.fillStyle = colorSet.fill;
   ctx.fillRect(x, top, NODE_WIDTH, NODE_HEIGHT);
+  
+  // Apply light tint overlay if this node belongs to a root child
+  if (tintColor && state === "default") {
+    ctx.globalAlpha = 0.3; // Light tint
+    ctx.fillStyle = tintColor;
+    ctx.fillRect(x, top, NODE_WIDTH, NODE_HEIGHT);
+    ctx.globalAlpha = 1.0;
+  }
+  
   if (progressRatio !== null && progressRatio > 0) {
     drawProgressOverlay(x, top, NODE_WIDTH, NODE_HEIGHT, progressRatio);
   }
