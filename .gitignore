@@ -16,6 +16,8 @@ dist-ssr
 pnpm-debug.log*
 vite.config.ts.timestamp-*
 
+lambda.zip
+
 # Local .terraform directories
 .terraform/
 
