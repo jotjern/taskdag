@@ -1202,7 +1202,7 @@ function drawNode(
   
   // Apply light tint overlay if this node belongs to a root child
   if (tintColor && state === "default") {
-    ctx.globalAlpha = 0.3; // Light tint
+    ctx.globalAlpha = 0.45; // Light tint
     ctx.fillStyle = tintColor;
     ctx.fillRect(x, top, NODE_WIDTH, NODE_HEIGHT);
     ctx.globalAlpha = 1.0;
