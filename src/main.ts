@@ -1118,21 +1118,18 @@ function moveHoveredNode(direction: Direction) {
 }
 
 function ensureNodeInView(node: NodeHitbox) {
-  // Calculate node bounds in screen coordinates
-  const nodeCenterX = node.x + node.width / 2;
-  const nodeCenterY = node.y + node.height / 2;
+  // Calculate node bounds in world coordinates
   const nodeLeft = node.x;
   const nodeRight = node.x + node.width;
   const nodeTop = node.y;
   const nodeBottom = node.y + node.height;
   
-  // Convert to screen coordinates
-  const screenLeft = panX + zoom * nodeLeft;
-  const screenRight = panX + zoom * nodeRight;
-  const screenTop = panY + zoom * nodeTop;
-  const screenBottom = panY + zoom * nodeBottom;
-  const screenCenterX = panX + zoom * nodeCenterX;
-  const screenCenterY = panY + zoom * nodeCenterY;
+  // Calculate where the node would be at the current target pan/zoom
+  // Use panTargetX/panTargetY to account for ongoing animations
+  const screenLeft = panTargetX + zoom * nodeLeft;
+  const screenRight = panTargetX + zoom * nodeRight;
+  const screenTop = panTargetY + zoom * nodeTop;
+  const screenBottom = panTargetY + zoom * nodeBottom;
   
   // Check if node is in view with some margin
   const margin = 40;
@@ -1145,50 +1142,48 @@ function ensureNodeInView(node: NodeHitbox) {
   let targetPanX = panTargetX;
   let targetPanY = panTargetY;
   
-  // Check horizontal visibility
+  // Check horizontal visibility and calculate required pan
   if (screenRight < viewLeft) {
-    // Node is to the left of viewport
-    const offset = viewLeft - screenCenterX;
-    targetPanX = panTargetX + offset;
+    // Node is completely to the left of viewport - bring left edge into view
+    targetPanX = viewLeft - zoom * nodeLeft;
     needsPan = true;
   } else if (screenLeft > viewRight) {
-    // Node is to the right of viewport
-    const offset = viewRight - screenCenterX;
-    targetPanX = panTargetX + offset;
+    // Node is completely to the right of viewport - bring right edge into view
+    targetPanX = viewRight - zoom * nodeRight;
     needsPan = true;
-  } else if (screenLeft < viewLeft) {
-    // Node is partially off left edge
-    const offset = viewLeft - screenLeft;
-    targetPanX = panTargetX + offset;
-    needsPan = true;
-  } else if (screenRight > viewRight) {
-    // Node is partially off right edge
-    const offset = viewRight - screenRight;
-    targetPanX = panTargetX + offset;
-    needsPan = true;
+  } else {
+    // Node is partially visible, ensure it's fully in view
+    if (screenLeft < viewLeft) {
+      // Left edge is off screen - adjust to show left edge
+      targetPanX = viewLeft - zoom * nodeLeft;
+      needsPan = true;
+    } else if (screenRight > viewRight) {
+      // Right edge is off screen - adjust to show right edge
+      targetPanX = viewRight - zoom * nodeRight;
+      needsPan = true;
+    }
   }
   
-  // Check vertical visibility
+  // Check vertical visibility and calculate required pan
   if (screenBottom < viewTop) {
-    // Node is above viewport
-    const offset = viewTop - screenCenterY;
-    targetPanY = panTargetY + offset;
+    // Node is completely above viewport - bring top edge into view
+    targetPanY = viewTop - zoom * nodeTop;
     needsPan = true;
   } else if (screenTop > viewBottom) {
-    // Node is below viewport
-    const offset = viewBottom - screenCenterY;
-    targetPanY = panTargetY + offset;
+    // Node is completely below viewport - bring bottom edge into view
+    targetPanY = viewBottom - zoom * nodeBottom;
     needsPan = true;
-  } else if (screenTop < viewTop) {
-    // Node is partially off top edge
-    const offset = viewTop - screenTop;
-    targetPanY = panTargetY + offset;
-    needsPan = true;
-  } else if (screenBottom > viewBottom) {
-    // Node is partially off bottom edge
-    const offset = viewBottom - screenBottom;
-    targetPanY = panTargetY + offset;
-    needsPan = true;
+  } else {
+    // Node is partially visible, ensure it's fully in view
+    if (screenTop < viewTop) {
+      // Top edge is off screen - adjust to show top edge
+      targetPanY = viewTop - zoom * nodeTop;
+      needsPan = true;
+    } else if (screenBottom > viewBottom) {
+      // Bottom edge is off screen - adjust to show bottom edge
+      targetPanY = viewBottom - zoom * nodeBottom;
+      needsPan = true;
+    }
   }
   
   if (needsPan) {
