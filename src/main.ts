@@ -156,30 +156,40 @@ async function loadStateFromStorage(): Promise<{ task: Task; states: Map<string,
   
   // Default state
   return {
-    task: {
-      label: "Base",
-      subtasks: [
-        {
-          label: "EECS MEng",
-          subtasks: [
-            {
-              label: "NORAM scholarship",
-              subtasks: [
-                {
-                  label: "Recommendation letters",
-                  subtasks: [
-                    { label: "Rec letter 1", subtasks: [] },
-                    { label: "Rec letter 2", subtasks: [] },
-                    { label: "Rec letter 3", subtasks: [] },
-                  ],
-                },
-                { label: "Application letter", subtasks: [] },
-              ],
-            },
-          ],
-        },
-      ],
-    },
+  task: {
+    label: "Student Hustle",
+    subtasks: [
+      {
+        label: "Assignment CS167",
+        subtasks: [
+          {
+            label: "Buy ChatGPT Pro",
+            subtasks: [
+              {
+                label: "Earn money",
+                subtasks: [{ label: "Work at McDonalds", subtasks: [] }],
+              },
+            ],
+          },
+          {
+            label: "Invent AGI",
+            subtasks: [],
+          },
+        ],
+      },
+      {
+        label: "Get summer internship",
+        subtasks: [
+          { label: "500 LinkedIn connections", subtasks: [] },
+          { label: "Have rich dad", subtasks: [] },
+          {
+            label: "Create B2B SaaS startup",
+            subtasks: [{ label: "Get into YC", subtasks: [] }],
+          },
+        ],
+      },
+    ],
+  },
     states: new Map(),
   };
 }
