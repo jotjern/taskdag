@@ -366,7 +366,20 @@ function setupPanHandlers(canvas: HTMLCanvasElement) {
       if (hitNode.task === rootTask) {
         hitNode = null;
       } else {
-        action = getActionFromPosition(hitNode, worldX);
+        // Check if hovering over the menu area (above the node) or the node itself
+        const menuHeight = NODE_HEIGHT * 0.75;
+        const nodeTop = hitNode.y;
+        const menuTop = nodeTop - menuHeight;
+        const isOverMenu = worldY >= menuTop && worldY < nodeTop && worldX >= hitNode.x && worldX <= hitNode.x + hitNode.width;
+        const isOverNode = worldY >= nodeTop && worldY < nodeTop + hitNode.height && worldX >= hitNode.x && worldX <= hitNode.x + hitNode.width;
+        
+        if (isOverMenu) {
+          // Hovering over menu - determine which action
+          action = getActionFromPosition(hitNode, worldX);
+        } else if (isOverNode) {
+          // Hovering over node itself - show menu with no action selected
+          action = null;
+        }
       }
     }
     if (!hitNode || action === null) {
