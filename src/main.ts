@@ -100,30 +100,121 @@ function computeLayoutHeight(task: Task): number {
   return leaves * (NODE_HEIGHT + NODE_VERTICAL_SPACING);
 }
 
-const rootTask: Task = {
-  label: "Base",
-  subtasks: [
-    {
-      label: "EECS MEng",
+// Load initial state from localStorage or use default
+function loadStateFromStorage(): { task: Task; states: Map<string, TaskState> } {
+  try {
+    const saved = localStorage.getItem("taskdag-state");
+    if (saved) {
+      const parsed = JSON.parse(saved);
+      // Convert array of [string, TaskState] tuples to Map
+      const stateMap = new Map<string, TaskState>();
+      if (Array.isArray(parsed.states)) {
+        parsed.states.forEach(([path, state]: [string, TaskState]) => {
+          stateMap.set(path, state);
+        });
+      }
+      return {
+        task: parsed.task,
+        states: stateMap,
+      };
+    }
+  } catch (e) {
+    console.warn("Failed to load state from localStorage", e);
+  }
+  
+  // Default state
+  return {
+    task: {
+      label: "Base",
       subtasks: [
         {
-          label: "NORAM scholarship",
+          label: "EECS MEng",
           subtasks: [
             {
-              label: "Recommendation letters",
+              label: "NORAM scholarship",
               subtasks: [
-                { label: "Rec letter 1", subtasks: [] },
-                { label: "Rec letter 2", subtasks: [] },
-                { label: "Rec letter 3", subtasks: [] },
+                {
+                  label: "Recommendation letters",
+                  subtasks: [
+                    { label: "Rec letter 1", subtasks: [] },
+                    { label: "Rec letter 2", subtasks: [] },
+                    { label: "Rec letter 3", subtasks: [] },
+                  ],
+                },
+                { label: "Application letter", subtasks: [] },
               ],
             },
-            { label: "Application letter", subtasks: [] },
           ],
         },
       ],
     },
-  ],
-};
+    states: new Map(),
+  };
+}
+
+function getTaskPath(task: Task, root: Task, path: number[] = []): number[] | null {
+  if (task === root) return [];
+  for (let i = 0; i < root.subtasks.length; i++) {
+    const child = root.subtasks[i];
+    if (child === task) {
+      return [i];
+    }
+    const childPath = getTaskPath(task, child, [i]);
+    if (childPath) {
+      return [i, ...childPath];
+    }
+  }
+  return null;
+}
+
+function getTaskByPath(root: Task, path: number[]): Task | null {
+  let current: Task = root;
+  for (const index of path) {
+    if (index < 0 || index >= current.subtasks.length) return null;
+    current = current.subtasks[index];
+  }
+  return current;
+}
+
+function collectTaskStates(root: Task, states: WeakMap<Task, TaskState>, path: number[] = []): Array<[string, TaskState]> {
+  const result: Array<[string, TaskState]> = [];
+  const state = states.get(root);
+  if (state) {
+    result.push([JSON.stringify(path), state]);
+  }
+  root.subtasks.forEach((child, index) => {
+    result.push(...collectTaskStates(child, states, [...path, index]));
+  });
+  return result;
+}
+
+function restoreTaskStates(root: Task, states: WeakMap<Task, TaskState>, stateMap: Map<string, TaskState>, path: number[] = []) {
+  const pathKey = JSON.stringify(path);
+  const state = stateMap.get(pathKey);
+  if (state) {
+    states.set(root, state);
+  }
+  root.subtasks.forEach((child, index) => {
+    restoreTaskStates(child, states, stateMap, [...path, index]);
+  });
+}
+
+function saveStateToStorage(root: Task, states: WeakMap<Task, TaskState>) {
+  try {
+    const stateArray = collectTaskStates(root, states);
+    const data = {
+      task: root,
+      states: stateArray,
+    };
+    localStorage.setItem("taskdag-state", JSON.stringify(data));
+  } catch (e) {
+    console.warn("Failed to save state to localStorage", e);
+  }
+}
+
+
+const initialState = loadStateFromStorage();
+let rootTask: Task = initialState.task;
 
 const { canvas, ctx } = initCanvas();
 let viewport = configureCanvas(canvas, ctx);
@@ -143,6 +234,8 @@ let nodeHitboxes: NodeHitbox[] = [];
 const displayPositions = new Map<Task, Position>();
 let pendingNodes: PendingNode[] = [];
 const taskStates = new WeakMap<Task, TaskState>();
+// Restore states from localStorage
+restoreTaskStates(rootTask, taskStates, initialState.states);
 let layoutAnimationStartTime = 0;
 let layoutAnimationStartPositions: Map<Task, Position> | null = null;
 let layoutAnimationProgress = 1;
@@ -435,6 +528,7 @@ function addRootChild() {
   rootTask.subtasks.push(newTask);
   pendingEditTask = newTask;
   pendingEditParent = rootTask;
+  saveStateToStorage(rootTask, taskStates);
   render();
 }
 
@@ -1147,6 +1241,7 @@ function handleAction(action: ActionType, node: NodeHitbox) {
   if (shouldAnimateLayout && previousPositions) {
     startLayoutAnimation(previousPositions);
   }
+  saveStateToStorage(rootTask, taskStates);
   render();
 }
 
@@ -1346,6 +1441,7 @@ function ensureEditingInput(): HTMLInputElement {
   input.addEventListener("input", () => {
     if (!editingTask) return;
     editingTask.label = input.value;
+    saveStateToStorage(rootTask, taskStates);
     render();
   });
 
@@ -1442,11 +1538,12 @@ function finishEditingTask(commit: boolean) {
   editingParentForRemoval = null;
   editingInitialLabel = "";
   editingInput.style.display = "none";
+  saveStateToStorage(rootTask, taskStates);
   render();
 }
 
 function removeTaskFromParent(task: Task, parent: Task | null) {
-  if (!parent || !parent.subtasks) return;
+  if (!parent) return;
   parent.subtasks = parent.subtasks.filter((child) => child !== task);
   clearTaskStateRecursive(task);
 }
